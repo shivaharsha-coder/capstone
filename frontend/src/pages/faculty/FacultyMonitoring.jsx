@@ -32,16 +32,34 @@ import {
   Mic,
   MicOff,
   VideoOff,
-  EyeOff
+  EyeOff,
+  MonitorUp,
+  MonitorOff,
+  Tv
 } from 'lucide-react';
-import api from '../../api/client';
+import api, { getWsUrl } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 
 export const FacultyMonitoring = () => {
+  const { user } = useAuth();
   const [monitoringActive, setMonitoringActive] = useState(false);
   const monitoringActiveRef = useRef(false);
   const [cameraConnected, setCameraConnected] = useState(false);
   const [cameraError, setCameraError] = useState('');
   const [classroomName, setClassroomName] = useState('Smart Classroom 401');
+
+  // Live Screen Sharing State for Teaching Lectures
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+  const [availableCourses, setAvailableCourses] = useState([]);
+  const screenStreamRef = useRef(null);
+  const screenVideoRef = useRef(null);
+  const screenIntervalRef = useRef(null);
+  const wsRef = useRef(null);
 
   // Live Students Roster
   const [liveStudents, setLiveStudents] = useState([]);
@@ -85,31 +103,9 @@ export const FacultyMonitoring = () => {
   const streamRef = useRef(null);
   const audioCtxRef = useRef(null);
 
-  // Audible warning signal for faculty console
+  // Muted/calm alert handler - eliminates intrusive buzzer alarms during lectures
   const playFacultyWarningSignal = () => {
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') ctx.resume();
-
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(880, now);
-      osc.frequency.setValueAtTime(659.25, now + 0.15);
-      osc.frequency.setValueAtTime(880, now + 0.30);
-      gain.gain.setValueAtTime(0.4, now);
-      gain.gain.linearRampToValueAtTime(0.01, now + 0.5);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.5);
-    } catch (e) {
-      console.warn('Audio alert error:', e);
-    }
+    // Intentionally silent to prevent disturbing faculty lectures
   };
 
   const getBackendUrl = (path) => {
@@ -167,11 +163,28 @@ export const FacultyMonitoring = () => {
     }
   };
 
+  const fetchFacultyCourses = async () => {
+    try {
+      const res = await api.get('/api/monitoring/faculty-courses');
+      if (res.data) {
+        setAvailableCourses(res.data);
+        const myCourse = res.data.find(c => c.is_assigned_to_current_user);
+        if (myCourse) {
+          setMeetingSubject(`${myCourse.code} - ${myCourse.name}`);
+          setMeetingTitle(`Lecture: ${myCourse.name}`);
+        }
+      }
+    } catch (err) {
+      console.warn('Error fetching faculty courses:', err);
+    }
+  };
+
   const checkActiveSession = async () => {
     try {
       const res = await api.get('/api/monitoring/active-session');
       if (res.data.is_active) {
         setMeetingActive(true);
+        if (res.data.session_id) setSessionId(res.data.session_id);
         if (res.data.title) setMeetingTitle(res.data.title);
         if (res.data.classroom_name) setClassroomName(res.data.classroom_name);
       }
@@ -180,11 +193,127 @@ export const FacultyMonitoring = () => {
     }
   };
 
+  // --- SCREEN SHARING FOR TEACHING LECTURES ---
+  const startScreenShare = async () => {
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { cursor: 'always', displaySurface: 'monitor' },
+        audio: false
+      });
+      screenStreamRef.current = screenStream;
+      setIsScreenSharing(true);
+
+      if (screenVideoRef.current) {
+        screenVideoRef.current.srcObject = screenStream;
+        screenVideoRef.current.play().catch(e => console.warn(e));
+      }
+
+      // If meeting session hasn't been started, auto-create one so students see live session
+      let activeSid = sessionIdRef.current;
+      if (!activeSid) {
+        try {
+          const startRes = await api.post('/api/monitoring/start-session', {
+            title: meetingTitle || `${meetingSubject} Live Lecture`,
+            subject_code: meetingSubject.split(' ')[0] || "CS501",
+            classroom_name: classroomName
+          });
+          activeSid = startRes.data.session_id || startRes.data.session?.session_id;
+          if (activeSid) {
+            setSessionId(activeSid);
+            sessionIdRef.current = activeSid;
+            setMeetingActive(true);
+          }
+        } catch (se) {
+          console.warn("Could not auto-start session on screen share:", se);
+        }
+      }
+
+      activeSid = activeSid || 'default';
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'SCREEN_SHARE_STARTED',
+          session_id: activeSid,
+          faculty_name: user?.name || 'Faculty'
+        }));
+      }
+
+      // Automatically handle stop sharing when clicked from browser floating banner
+      screenStream.getVideoTracks()[0].onended = () => {
+        stopScreenShare();
+      };
+
+      // Periodic screen frame broadcast to attending students
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      let frameCounter = 0;
+
+      if (screenIntervalRef.current) clearInterval(screenIntervalRef.current);
+      screenIntervalRef.current = setInterval(() => {
+        if (!screenStreamRef.current || !screenStreamRef.current.active) return;
+        const videoTrack = screenStreamRef.current.getVideoTracks()[0];
+        if (!videoTrack || videoTrack.readyState !== 'live') return;
+
+        if (screenVideoRef.current && screenVideoRef.current.readyState >= 2) {
+          canvas.width = Math.min(1280, screenVideoRef.current.videoWidth || 1280);
+          canvas.height = Math.min(720, screenVideoRef.current.videoHeight || 720);
+          ctx.drawImage(screenVideoRef.current, 0, 0, canvas.width, canvas.height);
+          const frameData = canvas.toDataURL('image/jpeg', 0.65);
+
+          const currentSid = sessionIdRef.current || 'default';
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              type: 'SCREEN_SHARE_FRAME',
+              session_id: currentSid,
+              frame: frameData
+            }));
+          }
+
+          frameCounter++;
+          if (frameCounter % 5 === 0) {
+            api.post('/api/monitoring/screen-share/frame', {
+              session_id: currentSid,
+              frame_base64: frameData
+            }).catch(() => {});
+          }
+        }
+      }, 300);
+
+    } catch (err) {
+      console.warn('Screen share cancelled or failed:', err);
+      setIsScreenSharing(false);
+    }
+  };
+
+  const stopScreenShare = () => {
+    if (screenIntervalRef.current) {
+      clearInterval(screenIntervalRef.current);
+      screenIntervalRef.current = null;
+    }
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((track) => track.stop());
+      screenStreamRef.current = null;
+    }
+    if (screenVideoRef.current) {
+      screenVideoRef.current.srcObject = null;
+    }
+    setIsScreenSharing(false);
+
+    const activeSid = sessionIdRef.current || 'default';
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'SCREEN_SHARE_STOPPED',
+        session_id: activeSid
+      }));
+    }
+    api.post('/api/monitoring/screen-share/stop', { session_id: activeSid }).catch(e => console.warn(e));
+  };
+
   useEffect(() => {
     fetchAlerts();
     fetchLiveStudents();
     fetchVideos();
     checkActiveSession();
+    fetchFacultyCourses();
 
     const rosterInterval = setInterval(() => {
       fetchLiveStudents();
@@ -192,9 +321,15 @@ export const FacultyMonitoring = () => {
 
     let ws = null;
     try {
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.hostname || 'localhost';
-      ws = new WebSocket(`${wsProtocol}//${host}:8000/api/monitoring/ws`);
+      const wsUrl = getWsUrl('/api/monitoring/ws');
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (sessionId) {
+          ws.send(JSON.stringify({ type: 'JOIN_SESSION', session_id: sessionId, role: 'FACULTY' }));
+        }
+      };
 
       ws.onmessage = (event) => {
         try {
@@ -411,12 +546,24 @@ export const FacultyMonitoring = () => {
     setUrgentBannerAlert(null);
     recordedChunksRef.current = [];
 
+    let createdSessionId = null;
     try {
-      await api.post('/api/monitoring/start-session', {
+      const startRes = await api.post('/api/monitoring/start-session', {
         title: meetingTitle || "CS501 - Computer Networks",
         subject_code: meetingSubject.split(' ')[0] || "CS501",
         classroom_name: classroomName
       });
+      createdSessionId = startRes.data.session_id || startRes.data.session?.session_id;
+      if (createdSessionId) {
+        setSessionId(createdSessionId);
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'JOIN_SESSION',
+            session_id: createdSessionId,
+            role: 'FACULTY'
+          }));
+        }
+      }
     } catch (e) {
       console.error('Start session API error:', e);
       alert('Could not start live class session on server. Please verify backend is online.');
@@ -441,6 +588,7 @@ export const FacultyMonitoring = () => {
   // --- END CLASS MEETING & PUBLISH TO ADMIN PORTAL ---
   const handleEndClassMeeting = async () => {
     setMeetingSaving(true);
+    stopScreenShare();
 
     if (meetingTimerRef.current) {
       clearInterval(meetingTimerRef.current);
@@ -714,8 +862,26 @@ export const FacultyMonitoring = () => {
               </div>
             </div>
 
-            {/* End Class Button */}
-            <div className="flex items-center gap-3">
+            {/* Action Buttons: Screen Share & End Class */}
+            <div className="flex flex-wrap items-center gap-3">
+              {isScreenSharing ? (
+                <button
+                  onClick={stopScreenShare}
+                  className="px-5 py-3.5 rounded-2xl bg-gradient-to-r from-amber-600 to-rose-600 hover:from-amber-500 hover:to-rose-500 text-white font-bold text-xs shadow-xl shadow-rose-600/30 transition flex items-center justify-center gap-2 animate-pulse"
+                >
+                  <MonitorOff className="w-4 h-4" />
+                  <span>Stop Screen Share</span>
+                </button>
+              ) : (
+                <button
+                  onClick={startScreenShare}
+                  className="px-5 py-3.5 rounded-2xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-bold text-xs shadow-xl shadow-indigo-600/30 transition flex items-center justify-center gap-2"
+                >
+                  <MonitorUp className="w-4 h-4" />
+                  <span>Share Screen & Teach</span>
+                </button>
+              )}
+
               <button
                 onClick={handleEndClassMeeting}
                 disabled={meetingSaving}
@@ -783,13 +949,31 @@ export const FacultyMonitoring = () => {
                 <label className="text-slate-400 text-[11px] font-semibold block mb-1">
                   Course / Subject:
                 </label>
-                <input
-                  type="text"
-                  value={meetingSubject}
-                  onChange={(e) => setMeetingSubject(e.target.value)}
-                  placeholder="e.g. CS501 - Computer Networks"
-                  className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white outline-none focus:border-indigo-500 transition"
-                />
+                {availableCourses.length > 0 ? (
+                  <select
+                    value={meetingSubject}
+                    onChange={(e) => {
+                      setMeetingSubject(e.target.value);
+                      const c = availableCourses.find(item => `${item.code} - ${item.name}` === e.target.value);
+                      if (c) setMeetingTitle(`Lecture: ${c.name}`);
+                    }}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white outline-none focus:border-indigo-500 transition cursor-pointer"
+                  >
+                    {availableCourses.map((c) => (
+                      <option key={c.id} value={`${c.code} - ${c.name}`}>
+                        {c.code} - {c.name} {c.is_assigned_to_current_user ? '★ (My Course)' : `(${c.faculty_name})`}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={meetingSubject}
+                    onChange={(e) => setMeetingSubject(e.target.value)}
+                    placeholder="e.g. CS501 - Computer Networks"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white outline-none focus:border-indigo-500 transition"
+                  />
+                )}
               </div>
 
               <div>
@@ -854,40 +1038,78 @@ export const FacultyMonitoring = () => {
             </div>
 
             <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center shadow-inner">
+              {/* Screen Share Video Stream */}
+              <video
+                ref={screenVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`w-full h-full object-contain bg-black ${isScreenSharing ? '' : 'hidden'}`}
+              />
+
+              {/* Webcam Video Stream (Full if not screen sharing, PiP if screen sharing) */}
               <video
                 ref={videoRef}
                 autoPlay
                 playsInline
                 muted
-                className={`w-full h-full object-cover ${cameraConnected ? '' : 'hidden'}`}
+                className={
+                  isScreenSharing && cameraConnected
+                    ? 'absolute bottom-4 right-4 w-48 h-32 object-cover rounded-xl border-2 border-indigo-500 shadow-2xl z-20'
+                    : cameraConnected && !isScreenSharing
+                    ? 'w-full h-full object-cover'
+                    : 'hidden'
+                }
               />
-              {!cameraConnected && (
+
+              {isScreenSharing && (
+                <div className="absolute top-3 left-3 px-3 py-1.5 rounded-xl bg-indigo-950/85 backdrop-blur-md border border-indigo-500/50 text-indigo-200 text-xs font-bold flex items-center gap-2 shadow-xl z-20">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+                  <MonitorUp className="w-4 h-4 text-indigo-300" />
+                  <span>LIVE SCREEN BROADCASTING TO STUDENTS</span>
+                </div>
+              )}
+
+              {!cameraConnected && !isScreenSharing && (
                 <div className="flex flex-col items-center justify-center p-6 text-center text-slate-500">
                   <div className="w-14 h-14 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 mb-2">
                     <Video className="w-7 h-7" />
                   </div>
-                  <p className="text-sm font-semibold text-white">Camera Standby</p>
+                  <p className="text-sm font-semibold text-white">Camera & Screen Share Ready</p>
                   <p className="text-xs text-slate-400 mt-1 max-w-xs">
-                    Instructor webcam is currently inactive. Click below to start preview or start a live class meeting.
+                    Start a live meeting above to stream your camera and share your screen with lecture slides.
                   </p>
-                  <button
-                    onClick={startCamera}
-                    className="mt-3 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-lg shadow-indigo-600/30"
-                  >
-                    <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>Start Camera Preview</span>
-                  </button>
+                  <div className="flex items-center gap-2 mt-3">
+                    <button
+                      onClick={startCamera}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-lg shadow-indigo-600/30"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>Start Camera Preview</span>
+                    </button>
+                    {meetingActive && (
+                      <button
+                        onClick={startScreenShare}
+                        className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-lg shadow-teal-600/30"
+                      >
+                        <MonitorUp className="w-3.5 h-3.5" />
+                        <span>Share Screen</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
-              {cameraConnected && (
+
+              {cameraConnected && !isScreenSharing && (
                 <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur-md border border-white/10 text-white text-[11px] font-semibold flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
                   <span>LIVE INSTRUCTOR BROADCAST</span>
                 </div>
               )}
-              {cameraConnected && (
-                <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-white text-[11px] bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10">
-                  <span className="font-semibold text-slate-200 truncate">{meetingTitle}</span>
+
+              {(cameraConnected || isScreenSharing) && (
+                <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-white text-[11px] bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 z-10">
+                  <span className="font-semibold text-slate-200 truncate">{meetingTitle} {sessionId ? `(${sessionId})` : ''}</span>
                   <span className="font-mono text-emerald-400">⏱️ {formatTimer(meetingSeconds)}</span>
                 </div>
               )}

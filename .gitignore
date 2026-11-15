@@ -1,6 +1,17 @@
 node_modules/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 *.log
 frontend/dist/
 .DS_Store
+.env
+.env.local
+backend/smart_classroom.db-shm
+backend/smart_classroom.db-wal
+backend/uploads/snapshots/*.jpg
+!backend/uploads/snapshots/.gitkeep
+backend/uploads/proxy_evidence/*.jpg
+backend/uploads/recordings/*.webm
+test_frame.jpg

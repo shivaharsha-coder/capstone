@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -473,6 +473,87 @@ def faculty_register(payload: schemas.FacultyRegisterRequest, db: Session = Depe
 @router.post("/validate-password")
 def validate_password(payload: schemas.PasswordStrengthRequest):
     return validate_password_strength(payload.password)
+
+
+@router.post("/request-otp")
+def request_password_reset_otp(payload: schemas.ForgotPasswordOTPRequest, db: Session = Depends(get_db)):
+    """Generates a secure 6-digit OTP for password reset and logs dispatch."""
+    email = payload.email.strip().lower()
+    user = db.query(models.User).filter(models.User.email.ilike(email)).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account registered with this email address."
+        )
+
+    # Invalidate old OTPs for this email
+    db.query(models.PasswordResetOTP).filter(
+        models.PasswordResetOTP.email == email,
+        models.PasswordResetOTP.is_used == False
+    ).update({"is_used": True})
+
+    # Generate cryptographically random 6-digit OTP
+    import secrets
+    otp = f"{secrets.randbelow(900000) + 100000}"
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+
+    otp_record = models.PasswordResetOTP(
+        user_id=user.id,
+        email=email,
+        otp_code=otp,
+        expires_at=expires_at,
+        is_used=False
+    )
+    db.add(otp_record)
+    db.commit()
+
+    # In a production environment, send email via SMTP; in college development, also return preview OTP for testing
+    print(f"==================================================")
+    print(f"[SECURITY OTP DISPATCH] Password Reset for {email}: {otp}")
+    print(f"==================================================")
+
+    return {
+        "success": True,
+        "message": f"A 6-digit verification code has been dispatched to {email}. Valid for 15 minutes.",
+        "otp_preview": otp  # Included for seamless local evaluation and testing
+    }
+
+
+@router.post("/reset-password-otp")
+def reset_password_with_otp(payload: schemas.VerifyOTPAndResetPasswordRequest, db: Session = Depends(get_db)):
+    """Verifies OTP and securely updates user password."""
+    email = payload.email.strip().lower()
+    otp_code = payload.otp_code.strip()
+
+    otp_record = db.query(models.PasswordResetOTP).filter(
+        models.PasswordResetOTP.email == email,
+        models.PasswordResetOTP.otp_code == otp_code,
+        models.PasswordResetOTP.is_used == False,
+        models.PasswordResetOTP.expires_at >= datetime.utcnow()
+    ).first()
+
+    if not otp_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification OTP. Please request a new code."
+        )
+
+    user = db.query(models.User).filter(models.User.id == otp_record.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    strength = validate_password_strength(payload.new_password)
+    if not strength["has_min_length"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long."
+        )
+
+    user.password_hash = hash_password(payload.new_password)
+    otp_record.is_used = True
+    db.commit()
+
+    return {"success": True, "message": "Password successfully reset with OTP verification. You may now log in."}
 
 
 @router.post("/forgot-password")

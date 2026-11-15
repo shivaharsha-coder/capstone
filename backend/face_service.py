@@ -34,6 +34,36 @@ _feature_model.eval()
 _detectors = {}
 
 
+def validate_camera_quality(img: np.ndarray) -> Dict[str, Any]:
+    """
+    Validates webcam frame image quality:
+    - Blur check using Laplacian variance
+    - Lighting / brightness check
+    """
+    if img is None or img.size == 0:
+        return {"is_valid": False, "reason": "No image data"}
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        mean_brightness = np.mean(gray)
+
+        is_blurry = blur_score < 25.0
+        is_too_dark = mean_brightness < 30.0
+        is_too_bright = mean_brightness > 245.0
+
+        return {
+            "is_valid": not (is_blurry or is_too_dark or is_too_bright),
+            "blur_score": round(float(blur_score), 2),
+            "mean_brightness": round(float(mean_brightness), 2),
+            "is_blurry": is_blurry,
+            "is_too_dark": is_too_dark,
+            "is_too_bright": is_too_bright
+        }
+    except Exception:
+        return {"is_valid": True, "blur_score": 100.0, "mean_brightness": 128.0}
+
+
+
 def get_detector(width: int, height: int):
     key = (width, height)
     if key not in _detectors:

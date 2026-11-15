@@ -382,4 +382,85 @@ class ClassSessionVideo(Base):
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
 
+# =========================================================================
+# MULTI-USER & PHYSICAL CAMPUS ADDITIVE MODELS (Non-destructive)
+# =========================================================================
+
+class Classroom(Base):
+    """Physical campus classroom facilities."""
+    __tablename__ = "classrooms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_number = Column(String(50), unique=True, index=True, nullable=False)  # e.g., 'LH-401'
+    building = Column(String(100), default="Academic Block B")
+    capacity = Column(Integer, default=60)
+    facilities = Column(String(255), default="AI Vision Cameras, Smart Projector, Wi-Fi 6")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    timetables = relationship("Timetable", back_populates="classroom", cascade="all, delete-orphan")
+
+
+class Timetable(Base):
+    """Academic timetable schedule linking faculty, subjects, and classrooms."""
+    __tablename__ = "timetables"
+
+    id = Column(Integer, primary_key=True, index=True)
+    day_of_week = Column(String(20), nullable=False)  # 'Monday', 'Tuesday', ...
+    start_time = Column(String(10), nullable=False)  # '09:00 AM'
+    end_time = Column(String(10), nullable=False)    # '10:00 AM'
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False)
+    faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=False)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    subject = relationship("Subject")
+    faculty = relationship("Faculty")
+    classroom = relationship("Classroom", back_populates="timetables")
+
+
+class ClassroomSession(Base):
+    """
+    Persistent Multi-Faculty Classroom Sessions.
+    Allows multiple faculty members to simultaneously operate independent live lectures,
+    screen share with students, and record attendance without cross-session collision.
+    """
+    __tablename__ = "classroom_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_code = Column(String(100), unique=True, index=True, nullable=False)  # e.g., 'SES-CS501-A9B1'
+    title = Column(String(255), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)
+    subject_code = Column(String(50), nullable=True)
+    faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=True)
+    faculty_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    faculty_name = Column(String(255), nullable=False)
+    classroom_name = Column(String(100), default="Smart Classroom 401")
+    status = Column(String(20), default="ACTIVE")  # 'ACTIVE', 'COMPLETED'
+    is_screen_sharing = Column(Boolean, default=False)
+    screen_share_frame = Column(Text, nullable=True)  # Latest active screen snapshot (base64)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    attending_count = Column(Integer, default=0)
+
+    faculty = relationship("Faculty")
+    subject = relationship("Subject")
+
+
+class PasswordResetOTP(Base):
+    """Secure 6-digit OTP verification for password reset."""
+    __tablename__ = "password_reset_otps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    email = Column(String(255), nullable=False, index=True)
+    otp_code = Column(String(10), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
+
+
 

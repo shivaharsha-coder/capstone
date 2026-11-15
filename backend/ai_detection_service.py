@@ -2,7 +2,7 @@ import re
 import os
 import zipfile
 import math
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # Known LLM conversational markers & transitional cliches
 AI_MARKER_PATTERNS = [

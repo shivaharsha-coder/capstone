@@ -291,3 +291,47 @@ class NotificationResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+# =========================================================================
+# MULTI-USER CLASSROOM SESSIONS & SCREEN SHARE SCHEMAS
+# =========================================================================
+
+class StartSessionRequest(BaseModel):
+    title: Optional[str] = "Lecture: Computer Networks"
+    subject_code: Optional[str] = "CS501"
+    subject_id: Optional[int] = None
+    classroom_name: Optional[str] = "Smart Classroom 401"
+
+
+class ScreenShareFrameRequest(BaseModel):
+    session_id: Optional[str] = None
+    frame_base64: str
+    is_sharing: bool = True
+
+
+class ClassroomCreateRequest(BaseModel):
+    room_number: str
+    building: Optional[str] = "Academic Block B"
+    capacity: Optional[int] = 60
+    facilities: Optional[str] = "AI Vision Cameras, Smart Projector, Wi-Fi 6"
+
+
+class TimetableCreateRequest(BaseModel):
+    day_of_week: str
+    start_time: str
+    end_time: str
+    subject_id: int
+    faculty_id: int
+    classroom_id: Optional[int] = None
+
+
+class ForgotPasswordOTPRequest(BaseModel):
+    email: str
+
+
+class VerifyOTPAndResetPasswordRequest(BaseModel):
+    email: str
+    otp_code: str
+    new_password: str
+
+

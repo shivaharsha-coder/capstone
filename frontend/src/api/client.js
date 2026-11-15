@@ -1,6 +1,39 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+// Dynamically determine the backend API base URL so the app works seamlessly across multiple laptops on Wi-Fi
+export const getApiBaseUrl = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol;
+    const hostname = window.location.hostname || 'localhost';
+    return `${protocol}//${hostname}:8000`;
+  }
+  return 'http://localhost:8000';
+};
+
+// Dynamically determine WebSocket URL matching current hostname and protocol
+export const getWsUrl = (path = '/api/monitoring/ws') => {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  if (import.meta.env.VITE_API_BASE_URL) {
+    try {
+      const url = new URL(import.meta.env.VITE_API_BASE_URL);
+      const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${wsProtocol}//${url.host}${cleanPath}`;
+    } catch {
+      // fallback if invalid URL
+    }
+  }
+  if (typeof window !== 'undefined') {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const hostname = window.location.hostname || 'localhost';
+    return `${wsProtocol}//${hostname}:8000${cleanPath}`;
+  }
+  return `ws://localhost:8000${cleanPath}`;
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 const api = axios.create({
   baseURL: API_BASE_URL,

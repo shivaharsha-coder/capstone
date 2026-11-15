@@ -27,6 +27,7 @@ from routers import (
     notifications,
     reports,
     admin,
+    classrooms,
 )
 from seed import seed_database
 
@@ -81,6 +82,7 @@ app.include_router(announcements.router)
 app.include_router(notifications.router)
 app.include_router(reports.router)
 app.include_router(admin.router)
+app.include_router(classrooms.router)
 
 
 
@@ -99,4 +101,5 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

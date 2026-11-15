@@ -20,9 +20,13 @@ import {
   Radio,
   UserCheck,
   UserX,
-  XCircle
+  XCircle,
+  Monitor,
+  Tv,
+  Maximize2,
+  Minimize2
 } from 'lucide-react';
-import api from '../../api/client';
+import api, { getWsUrl } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 
 export const StudentLiveClass = () => {
@@ -34,12 +38,28 @@ export const StudentLiveClass = () => {
   const [classroomName, setClassroomName] = useState('Smart Classroom 401');
   const [subjectTitle, setSubjectTitle] = useState('CS501 - Computer Networks (Dr. Rajesh Sharma)');
 
+  // Enrolled Courses & Course Selection State
+  const [enrolledCourses, setEnrolledCourses] = useState([]);
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [coursesLoading, setCoursesLoading] = useState(true);
+  const selectedCourseRef = useRef(null);
+
+  useEffect(() => {
+    selectedCourseRef.current = selectedCourse;
+  }, [selectedCourse]);
+
   // Active session status from Faculty
   const [classSessionActive, setClassSessionActive] = useState(false);
   const [sessionDetails, setSessionDetails] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
 
-  // AI Live Indicators
+  // Faculty Live Screen Sharing Stream
+  const [facultyScreenFrame, setFacultyScreenFrame] = useState(null);
+  const [isFacultyScreenSharing, setIsFacultyScreenSharing] = useState(false);
+  const [isStageFullScreen, setIsStageFullScreen] = useState(false);
+  const stageContainerRef = useRef(null);
+
+  // AI Live Indicators (quiet & non-intrusive)
   const [headOrientation, setHeadOrientation] = useState('Facing Forward');
   const [phoneDetected, setPhoneDetected] = useState(false);
   const [phoneStatus, setPhoneStatus] = useState('No Smartphone Detected.');
@@ -48,7 +68,7 @@ export const StudentLiveClass = () => {
   const [attentionScore, setAttentionScore] = useState(100);
   const [distractionCount, setDistractionCount] = useState(0);
 
-  // AI Face Matching & Daily Attendance Consistency (Day 1 vs Day 2 Face Matching)
+  // AI Face Matching & Daily Attendance Consistency
   const [faceMatched, setFaceMatched] = useState(null); // true = Present, false = Absent
   const [faceSimilarity, setFaceSimilarity] = useState(0.0);
   const [attendanceStatus, setAttendanceStatus] = useState('Pending');
@@ -61,129 +81,167 @@ export const StudentLiveClass = () => {
   const streamRef = useRef(null);
   const scanIntervalRef = useRef(null);
   const isProcessingRef = useRef(false);
-  const audioCtxRef = useRef(null);
-  const lastSpokenRef = useRef(0);
+  const wsRef = useRef(null);
 
-  // Play audio warning signal
-  const playToneAlert = (type) => {
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') ctx.resume();
+  // Intentionally silent - removed loud buzzer alarms & speech synthesis per user request
+  const playToneAlert = () => {};
+  const speakGuidance = () => {};
 
-      if (type === 'PHONE') {
-        // High-pitched warning alarm for smartphone
-        const now = ctx.currentTime;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(880, now);
-        osc.frequency.setValueAtTime(440, now + 0.15);
-        osc.frequency.setValueAtTime(880, now + 0.30);
-        gain.gain.setValueAtTime(0.35, now);
-        gain.gain.linearRampToValueAtTime(0.01, now + 0.45);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + 0.45);
-      } else if (type === 'DISTRACTION') {
-        // Gentle reminder chime for looking away from screen
-        const now = ctx.currentTime;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(587.33, now);
-        osc.frequency.exponentialRampToValueAtTime(880, now + 0.25);
-        gain.gain.setValueAtTime(0.25, now);
-        gain.gain.linearRampToValueAtTime(0.01, now + 0.3);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + 0.3);
-      } else if (type === 'PROXY') {
-        // Harsh discord alarm for proxy face mismatch
-        const now = ctx.currentTime;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(320, now);
-        osc.frequency.setValueAtTime(160, now + 0.2);
-        gain.gain.setValueAtTime(0.4, now);
-        gain.gain.linearRampToValueAtTime(0.01, now + 0.45);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + 0.45);
-      }
-    } catch (e) {
-      console.warn('Audio alert error:', e);
+  const toggleStageFullScreen = () => {
+    if (!stageContainerRef.current) return;
+    if (!document.fullscreenElement) {
+      stageContainerRef.current.requestFullscreen().catch(err => console.warn(err));
+      setIsStageFullScreen(true);
+    } else {
+      document.exitFullscreen().catch(err => console.warn(err));
+      setIsStageFullScreen(false);
     }
   };
 
-  // Voice intimation: "Don't see surroundings, watch to the screen!"
-  const speakGuidance = (text) => {
+  const fetchStudentCourses = async () => {
     try {
-      const now = Date.now();
-      if (now - lastSpokenRef.current > 7000) {
-        lastSpokenRef.current = now;
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.rate = 1.05;
-          utterance.pitch = 1.0;
-          utterance.volume = 1.0;
-          window.speechSynthesis.speak(utterance);
-        }
-      }
-    } catch (e) {
-      console.warn('Speech synthesis error:', e);
-    }
-  };
+      const res = await api.get('/api/monitoring/student-enrolled-courses');
+      if (res.data && res.data.success) {
+        const list = res.data.courses || [];
+        setEnrolledCourses(list);
 
-  const checkActiveSession = async () => {
-    try {
-      const res = await api.get('/api/monitoring/active-session');
-      const data = res.data;
-      setClassSessionActive(data.is_active);
-      setSessionDetails(data);
-      if (data.title) setSubjectTitle(data.title);
-      if (data.classroom_name) setClassroomName(data.classroom_name);
-
-      if (!data.is_active && monitoringActiveRef.current) {
-        // Faculty ended session while student was attending
-        stopSession();
+        setSelectedCourse((prev) => {
+          if (prev) {
+            const fresh = list.find((c) => c.subject_id === prev.subject_id);
+            if (fresh) {
+              setClassSessionActive(Boolean(fresh.is_live));
+              if (fresh.is_live && fresh.session_id) {
+                setSessionDetails({
+                  session_id: fresh.session_id,
+                  title: fresh.session_title,
+                  classroom_name: fresh.classroom_name,
+                });
+              }
+              return fresh;
+            }
+          }
+          // Default to live course or first course
+          const liveCourse = list.find((c) => c.is_live);
+          const initial = liveCourse || list[0] || null;
+          if (initial) {
+            setSubjectTitle(initial.session_title || `${initial.code} - ${initial.name} (${initial.faculty_name})`);
+            setClassroomName(initial.classroom_name || 'Smart Classroom 401');
+            setClassSessionActive(Boolean(initial.is_live));
+            if (initial.session_id) {
+              setSessionDetails({
+                session_id: initial.session_id,
+                title: initial.session_title,
+                classroom_name: initial.classroom_name,
+              });
+            }
+          }
+          return initial;
+        });
       }
     } catch (err) {
-      console.warn('Could not check active session:', err);
+      console.warn('Could not fetch student courses:', err);
     } finally {
+      setCoursesLoading(false);
       setCheckingSession(false);
     }
   };
 
-  useEffect(() => {
-    checkActiveSession();
-    const pollInterval = setInterval(checkActiveSession, 3500);
+  const handleSelectCourse = (course) => {
+    if (!course) return;
+    setSelectedCourse(course);
+    setSubjectTitle(course.session_title || `${course.code} - ${course.name} (${course.faculty_name})`);
+    setClassroomName(course.classroom_name || 'Smart Classroom 401');
+    setClassSessionActive(Boolean(course.is_live));
 
-    // WebSocket real-time session listener
+    if (course.session_id) {
+      setSessionDetails({
+        session_id: course.session_id,
+        title: course.session_title,
+        classroom_name: course.classroom_name,
+      });
+    }
+
+    const targetRoom = course.session_id || course.code || 'default';
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'JOIN_SESSION',
+          session_id: targetRoom,
+          role: 'STUDENT',
+        })
+      );
+    }
+
+    checkActiveScreenShare(targetRoom);
+  };
+
+  const checkActiveScreenShare = async (forceSid = null) => {
+    const curCourse = selectedCourseRef.current;
+    const targetSid = forceSid || curCourse?.session_id || curCourse?.code || 'default';
+    try {
+      const screenRes = await api.get(`/api/monitoring/screen-share/${targetSid}`);
+      if (screenRes.data && screenRes.data.is_sharing && screenRes.data.frame) {
+        setIsFacultyScreenSharing(true);
+        setFacultyScreenFrame(screenRes.data.frame);
+        return;
+      }
+      // Check fallback latest frame
+      const latRes = await api.get('/api/monitoring/screen-share/latest');
+      if (latRes.data && latRes.data.is_sharing && latRes.data.frame) {
+        setIsFacultyScreenSharing(true);
+        setFacultyScreenFrame(latRes.data.frame);
+      } else if (!screenRes.data?.is_sharing) {
+        setIsFacultyScreenSharing(false);
+      }
+    } catch (e) {
+      // Silent fallback
+    }
+  };
+
+  useEffect(() => {
+    fetchStudentCourses();
+    checkActiveScreenShare();
+
+    const pollInterval = setInterval(() => {
+      fetchStudentCourses();
+      checkActiveScreenShare();
+    }, 2500);
+
     let ws = null;
     try {
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.hostname || 'localhost';
-      ws = new WebSocket(`${wsProtocol}//${host}:8000/api/monitoring/ws`);
+      const wsUrl = getWsUrl('/api/monitoring/ws');
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        const sid = selectedCourseRef.current?.session_id || selectedCourseRef.current?.code || 'default';
+        ws.send(
+          JSON.stringify({
+            type: 'JOIN_SESSION',
+            session_id: sid,
+            role: 'STUDENT',
+          })
+        );
+      };
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'CLASS_SESSION_STARTED' && msg.session) {
-            setClassSessionActive(true);
-            setSessionDetails(msg.session);
-            if (msg.session.title) setSubjectTitle(msg.session.title);
-            if (msg.session.classroom_name) setClassroomName(msg.session.classroom_name);
+          if (msg.type === 'CLASS_SESSION_STARTED') {
+            fetchStudentCourses();
           } else if (msg.type === 'CLASS_SESSION_ENDED') {
-            setClassSessionActive(false);
+            fetchStudentCourses();
+            setIsFacultyScreenSharing(false);
+            setFacultyScreenFrame(null);
             stopSession();
+          } else if (msg.type === 'SCREEN_SHARE_STARTED') {
+            setIsFacultyScreenSharing(true);
+          } else if (msg.type === 'SCREEN_SHARE_FRAME' && msg.frame) {
+            setIsFacultyScreenSharing(true);
+            setFacultyScreenFrame(msg.frame);
+          } else if (msg.type === 'SCREEN_SHARE_STOPPED') {
+            setIsFacultyScreenSharing(false);
+            setFacultyScreenFrame(null);
           }
         } catch (e) {
           console.warn(e);
@@ -238,7 +296,7 @@ export const StudentLiveClass = () => {
   };
 
   const startSession = async () => {
-    if (!classSessionActive) {
+    if (!classSessionActive && !isFacultyScreenSharing) {
       alert("Faculty has not started the class meeting yet. Please wait for the instructor to start.");
       return;
     }
@@ -248,6 +306,17 @@ export const StudentLiveClass = () => {
 
     setMonitoringActive(true);
     monitoringActiveRef.current = true;
+
+    const sid = selectedCourseRef.current?.session_id || selectedCourseRef.current?.code || 'default';
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'JOIN_SESSION',
+          session_id: sid,
+          role: 'STUDENT',
+        })
+      );
+    }
 
     if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
     scanIntervalRef.current = setInterval(() => {
@@ -340,11 +409,7 @@ export const StudentLiveClass = () => {
 
       if (isDistracted) {
         setDistractionCount((prev) => prev + 1);
-        setAttentionScore((prev) => Math.max(20, prev - 2));
-        if (!analysis.phone_detected) {
-          playToneAlert('DISTRACTION');
-          speakGuidance("Don't see surroundings, watch to the screen!");
-        }
+        setAttentionScore((prev) => Math.max(20, prev - 1));
       } else if (orient === 'Facing Forward') {
         setAttentionScore((prev) => Math.min(100, prev + 1));
       }
@@ -406,14 +471,14 @@ export const StudentLiveClass = () => {
         const by = y1 * scaleY;
         const bh = (y2 - y1) * scaleY;
 
-        ctx.strokeStyle = isGood ? '#10b981' : '#f59e0b';
-        ctx.lineWidth = isGood ? 2 : 3;
+        ctx.strokeStyle = isGood ? '#10b981' : '#38bdf8';
+        ctx.lineWidth = 2;
         ctx.strokeRect(bx, by, bw, bh);
 
-        const text = isGood ? 'WATCHING SCREEN' : "DON'T SEE SURROUNDINGS - WATCH SCREEN";
+        const text = isGood ? 'ATTENTIVE' : 'STUDENT (ENGAGED)';
         ctx.font = 'bold 11px sans-serif';
         const tw = ctx.measureText(text).width;
-        ctx.fillStyle = isGood ? '#10b981' : '#f59e0b';
+        ctx.fillStyle = isGood ? '#10b981' : '#38bdf8';
         ctx.fillRect(bx, Math.max(0, by - 22), tw + 12, 22);
         ctx.fillStyle = '#080c14';
         ctx.fillText(text, bx + 6, Math.max(15, by - 6));
@@ -438,7 +503,7 @@ export const StudentLiveClass = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          {classSessionActive ? (
+          {classSessionActive || isFacultyScreenSharing ? (
             !monitoringActive ? (
               <button
                 onClick={startSession}
@@ -465,10 +530,88 @@ export const StudentLiveClass = () => {
         </div>
       </div>
 
+      {/* =========================================================================
+          REGISTERED COURSES & LIVE MEETINGS SELECTOR
+          Enables the student to view all enrolled courses and seamlessly join any meeting!
+          ========================================================================= */}
+      <div className="p-4 rounded-3xl bg-[#0f172a] border border-slate-800 shadow-xl space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-800/80">
+          <div className="flex items-center gap-2">
+            <BookOpen className="w-4 h-4 text-indigo-400" />
+            <h2 className="text-xs font-bold text-white uppercase tracking-wider">
+              My Enrolled Courses & Live Class Meetings ({enrolledCourses.length})
+            </h2>
+          </div>
+          <div className="flex items-center gap-2 text-[11px]">
+            {enrolledCourses.some((c) => c.is_live) ? (
+              <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold flex items-center gap-1.5 animate-pulse">
+                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                {enrolledCourses.filter((c) => c.is_live).length} Class Meeting(s) Live Now
+              </span>
+            ) : (
+              <span className="text-slate-400">
+                ⚪ No other meetings active at this moment
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Horizontal course selector cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 pt-1">
+          {enrolledCourses.map((c) => {
+            const isSelected = selectedCourse?.subject_id === c.subject_id;
+            return (
+              <button
+                key={c.subject_id}
+                onClick={() => handleSelectCourse(c)}
+                className={`p-3.5 rounded-2xl border text-left transition-all relative flex flex-col justify-between group ${
+                  isSelected
+                    ? 'bg-gradient-to-br from-indigo-950/70 to-slate-900 border-indigo-500 text-white shadow-lg shadow-indigo-500/20 ring-1 ring-indigo-500'
+                    : 'bg-slate-900/70 border-slate-800 hover:border-slate-700 text-slate-300 hover:bg-slate-900'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-1.5 mb-1.5">
+                    <span className={`text-[11px] font-extrabold px-2 py-0.5 rounded-lg ${
+                      isSelected ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300'
+                    }`}>
+                      {c.code}
+                    </span>
+                    {c.is_live ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                        LIVE NOW
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-slate-500">⚪ Idle</span>
+                    )}
+                  </div>
+                  <h4 className="font-bold text-xs text-white line-clamp-1 group-hover:text-indigo-300 transition">
+                    {c.name}
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-0.5 truncate">
+                    👨‍🏫 {c.faculty_name}
+                  </p>
+                </div>
+
+                <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px]">
+                  <span className="text-slate-500 truncate">{c.classroom_name || 'Classroom 401'}</span>
+                  {isSelected && (
+                    <span className="text-indigo-400 font-bold flex items-center gap-0.5">
+                      Selected ✓
+                    </span>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Session Details Bar */}
       <div className="p-4 rounded-2xl bg-[#0f172a] border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex items-center gap-3 text-xs">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${classSessionActive
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${classSessionActive || isFacultyScreenSharing
             ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
             : 'bg-slate-900 border-slate-800 text-slate-500'
             }`}>
@@ -477,7 +620,7 @@ export const StudentLiveClass = () => {
           <div>
             <p className="font-bold text-white text-sm">{subjectTitle}</p>
             <p className="text-slate-400 text-[11px]">
-              {classroomName} • {classSessionActive ? '🔴 Live Streaming In Session' : '⚪ Class Meeting Not Started'}
+              {classroomName} • {isFacultyScreenSharing ? '🔴 Live Slides Broadcast in Progress' : classSessionActive ? '🔴 Live Streaming In Session' : '⚪ Class Meeting Not Started'}
             </p>
           </div>
         </div>
@@ -508,24 +651,24 @@ export const StudentLiveClass = () => {
             <span className="text-slate-400">Session:</span>
             <span className={`font-semibold flex items-center gap-1.5 ${monitoringActive
               ? 'text-emerald-400'
-              : classSessionActive
+              : classSessionActive || isFacultyScreenSharing
                 ? 'text-amber-400'
                 : 'text-slate-500'
               }`}>
               <span className={`w-2 h-2 rounded-full ${monitoringActive
                 ? 'bg-emerald-400 animate-ping'
-                : classSessionActive
+                : classSessionActive || isFacultyScreenSharing
                   ? 'bg-amber-400'
                   : 'bg-slate-600'
                 }`}></span>
-              {monitoringActive ? 'LIVE ATTENDING' : classSessionActive ? 'READY TO JOIN' : 'DISCONNECTED'}
+              {monitoringActive ? 'LIVE ATTENDING' : classSessionActive || isFacultyScreenSharing ? 'READY TO JOIN' : 'DISCONNECTED'}
             </span>
           </div>
         </div>
       </div>
 
-      {/* IF FACULTY HAS NOT STARTED MEETING: RENDER POLISHED WAITING ROOM */}
-      {!classSessionActive ? (
+      {/* IF FACULTY HAS NOT STARTED MEETING AND NOT SHARING SCREEN: RENDER POLISHED WAITING ROOM */}
+      {!classSessionActive && !isFacultyScreenSharing ? (
         <div className="p-12 text-center rounded-3xl bg-[#0f172a] border border-slate-800 shadow-2xl space-y-5 max-w-2xl mx-auto my-6">
           <div className="w-16 h-16 rounded-3xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto shadow-inner">
             <Clock className="w-8 h-8" />
@@ -538,19 +681,45 @@ export const StudentLiveClass = () => {
             </div>
 
             <h2 className="text-xl font-bold text-white tracking-tight">
-              Class Meeting Not Started Yet
+              Class Meeting Not Started Yet for {selectedCourse?.code || 'Course'}
             </h2>
             <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
               Your instructor has not started or created the live class meeting for <strong className="text-white">{subjectTitle}</strong> in <strong className="text-white">{classroomName}</strong>.
             </p>
             <p className="text-[11px] text-slate-500 pt-1">
-              Please stay on this page. As soon as the faculty begins the class meeting, you will automatically be able to join and start attendance monitoring.
+              Please stay on this page or choose another enrolled course above. As soon as the faculty begins the class meeting or shares their screen, you will automatically be able to attend and watch the slides.
             </p>
           </div>
 
+          {enrolledCourses.some((c) => c.is_live && c.subject_id !== selectedCourse?.subject_id) && (
+            <div className="p-4 rounded-2xl bg-indigo-950/70 border border-indigo-500/50 text-xs text-indigo-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-left shadow-xl">
+              <div>
+                <p className="font-bold text-white flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+                  Another enrolled class meeting is Live Now!
+                </p>
+                <p className="text-[11px] text-slate-300 mt-0.5">
+                  {enrolledCourses.find((c) => c.is_live && c.subject_id !== selectedCourse?.subject_id)?.code} -{' '}
+                  {enrolledCourses.find((c) => c.is_live && c.subject_id !== selectedCourse?.subject_id)?.name} is currently in session.
+                </p>
+              </div>
+              <button
+                onClick={() =>
+                  handleSelectCourse(enrolledCourses.find((c) => c.is_live && c.subject_id !== selectedCourse?.subject_id))
+                }
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs whitespace-nowrap shadow-lg shadow-emerald-600/25 transition"
+              >
+                Switch to Live Class →
+              </button>
+            </div>
+          )}
+
           <div className="pt-2">
             <button
-              onClick={checkActiveSession}
+              onClick={() => {
+                fetchStudentCourses();
+                checkActiveScreenShare();
+              }}
               className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-2 mx-auto transition"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${checkingSession ? 'animate-spin' : ''}`} />
@@ -602,64 +771,128 @@ export const StudentLiveClass = () => {
             </div>
           )}
 
-          {monitoringActive && !phoneDetected && isLookingAway && (
-            <div className="p-4 rounded-2xl bg-amber-500/25 border-2 border-amber-500 text-amber-200 text-xs flex items-center gap-3.5 shadow-2xl animate-pulse">
-              <AlertTriangle className="w-8 h-8 text-amber-400 shrink-0" />
-              <div className="flex-1">
-                <p className="font-extrabold text-sm text-white uppercase tracking-wider">⚠️ DON'T SEE SURROUNDINGS, WATCH TO THE SCREEN!</p>
-                <p className="text-xs text-amber-100 font-medium mt-0.5">
-                  You are seeing surroundings ({headOrientation}) instead of watching the lecture. Please turn your attention directly to the screen!
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Main Attendance Grid */}
+          {/* Main Lecture Presentation & Attendance Stage */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left 2 Cols: Camera Feed & Facial Overlays */}
+            {/* Left 2 Cols: Faculty Screen Share / Lecture Stage */}
             <div className="lg:col-span-2 space-y-4">
-              <div className="p-6 rounded-3xl bg-[#0f172a] border border-slate-800 shadow-xl space-y-4">
-                <div className="relative aspect-video w-full bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className={`w-full h-full object-cover transform ${monitoringActive ? 'scale-x-[-1]' : 'hidden'}`}
-                    style={{ imageRendering: '-webkit-optimize-contrast' }}
-                  />
-                  <canvas
-                    ref={canvasRef}
-                    className={`absolute inset-0 pointer-events-none ${monitoringActive ? '' : 'hidden'}`}
-                  />
-
-                  {/* Camera Paused / Not Joined */}
-                  {!monitoringActive && (
-                    <div className="flex flex-col items-center gap-3 text-slate-400 p-8 text-center">
-                      <div className="w-14 h-14 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
-                        <Video className="w-7 h-7" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-semibold text-white">Live Class Meeting is Ready</p>
-                        <p className="text-xs text-slate-400 mt-1 max-w-xs">
-                          Click below to start your webcam and broadcast your live attendance.
-                        </p>
-                      </div>
-                      <button
-                        onClick={startSession}
-                        className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/30 transition flex items-center gap-2"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        <span>Join Live Class</span>
-                      </button>
+              <div
+                ref={stageContainerRef}
+                className="p-5 rounded-3xl bg-[#0f172a] border border-slate-800 shadow-xl space-y-4 relative"
+              >
+                {/* Header above Lecture Stage */}
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">
+                      {isFacultyScreenSharing ? <Monitor className="w-4 h-4 text-emerald-400" /> : <Tv className="w-4 h-4" />}
                     </div>
-                  )}
+                    <div>
+                      <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                        {isFacultyScreenSharing ? 'Faculty Live Screen Presentation' : 'Classroom Lecture Stage'}
+                        {isFacultyScreenSharing && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse font-mono">
+                            LIVE SLIDES
+                          </span>
+                        )}
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        {isFacultyScreenSharing
+                          ? 'Instructor is sharing lecture slides and teaching online'
+                          : `${subjectTitle} • Live Class Stream`}
+                      </p>
+                    </div>
+                  </div>
 
-                  {/* Connected Badge */}
-                  {monitoringActive && (
-                    <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white text-[11px] font-semibold flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                      <span>LIVE CLASS ATTENDING</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={toggleStageFullScreen}
+                      className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition text-xs flex items-center gap-1.5"
+                      title="Toggle Fullscreen"
+                    >
+                      {isStageFullScreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                      <span className="hidden sm:inline">{isStageFullScreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Primary Screen Stage Area */}
+                <div className="relative aspect-video w-full bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
+                  {/* Case 1: Faculty IS Screen Sharing -> Show Presentation in Full Resolution */}
+                  {isFacultyScreenSharing && facultyScreenFrame ? (
+                    <div className="relative w-full h-full bg-black flex items-center justify-center">
+                      <img
+                        src={facultyScreenFrame}
+                        alt="Instructor Presentation"
+                        className="w-full h-full object-contain select-none"
+                      />
+
+                      {/* Top Presenter Overlay */}
+                      <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/75 backdrop-blur-md border border-white/10 text-white text-[11px] font-semibold flex items-center gap-2 z-10">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                        <span>FACULTY SCREEN BROADCAST</span>
+                      </div>
+
+                      {/* Student Camera PiP in Bottom Right Corner */}
+                      {monitoringActive && (
+                        <div className="absolute bottom-4 right-4 w-44 h-28 rounded-xl overflow-hidden border-2 border-indigo-500/80 bg-slate-950 shadow-2xl z-20 group">
+                          <video
+                            ref={videoRef}
+                            autoPlay
+                            playsInline
+                            muted
+                            className="w-full h-full object-cover transform scale-x-[-1]"
+                          />
+                          <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />
+                          <div className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/75 text-[9px] font-bold text-emerald-400 border border-emerald-500/30">
+                            {attendanceStatus === 'Present' ? '✓ ATTENDANCE PRESENT' : 'ATTENDING'}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    /* Case 2: Faculty Not Screen Sharing Yet -> Show Student Webcam or Standby */
+                    <div className="relative w-full h-full bg-slate-950 flex items-center justify-center">
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className={`w-full h-full object-cover transform ${monitoringActive ? 'scale-x-[-1]' : 'hidden'}`}
+                        style={{ imageRendering: '-webkit-optimize-contrast' }}
+                      />
+                      <canvas
+                        ref={canvasRef}
+                        className={`absolute inset-0 pointer-events-none ${monitoringActive ? '' : 'hidden'}`}
+                      />
+
+                      {/* Camera Paused / Not Joined */}
+                      {!monitoringActive && (
+                        <div className="flex flex-col items-center gap-3 text-slate-400 p-8 text-center z-10">
+                          <div className="w-14 h-14 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
+                            <Video className="w-7 h-7" />
+                          </div>
+                          <div>
+                            <p className="text-sm font-semibold text-white">Live Class Meeting is Ready</p>
+                            <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                              Click below to start your webcam and broadcast your live attendance.
+                            </p>
+                          </div>
+                          <button
+                            onClick={startSession}
+                            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/30 transition flex items-center gap-2"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            <span>Join Live Class</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Connected Badge */}
+                      {monitoringActive && (
+                        <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white text-[11px] font-semibold flex items-center gap-2 z-10">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                          <span>LIVE CLASS ATTENDING (WAITING FOR LECTURE SLIDES)</span>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
